@@ -42,7 +42,6 @@ jobs:
       - name: Install Multipass
         run: |
           sudo snap install multipass
-          sudo snap connect multipass:ssh-keys
           multipass version
       
       - name: Test VM creation and basic setup
@@ -79,7 +78,6 @@ jobs:
       - name: Install Multipass
         run: |
           sudo snap install multipass
-          sudo snap connect multipass:ssh-keys
           
       - name: Test setup-vm.sh execution
         run: |
@@ -172,7 +170,6 @@ jobs:
           
           # Install Multipass
           sudo snap install multipass
-          sudo snap connect multipass:ssh-keys
           
           # Create full test environment
           VM_NAME="rhce-integration-$(date +%s)"
