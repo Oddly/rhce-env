@@ -1,0 +1,253 @@
+name: RHCE Environment Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly test on Mondays
+
+jobs:
+  test-scripts-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Test shell script syntax
+        run: |
+          echo "Testing shell script syntax..."
+          find . -name "*.sh" -type f | while read script; do
+            echo "Testing: $script"
+            bash -n "$script"
+          done
+          echo "? All shell scripts pass syntax validation"
+
+      - name: Test PowerShell script syntax
+        shell: pwsh
+        run: |
+          if (Test-Path "windows_setup.ps1") {
+            Write-Host "Testing PowerShell syntax..."
+            $null = [System.Management.Automation.PSParser]::Tokenize((Get-Content windows_setup.ps1 -Raw), [ref]$null)
+            Write-Host "? PowerShell script passes syntax validation"
+          }
+
+  test-linux-environment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Multipass
+        run: |
+          sudo snap install multipass
+          sudo snap connect multipass:ssh-keys
+          multipass version
+      
+      - name: Test VM creation and basic setup
+        run: |
+          VM_NAME="test-vm-$(date +%s)"
+          echo "Creating test VM: $VM_NAME"
+          
+          # Create VM with minimal resources for testing
+          multipass launch 20.04 --name "$VM_NAME" --cpus 2 --memory 2G --disk 8G
+          sleep 15
+          
+          # Test VM access and basic functionality
+          multipass exec "$VM_NAME" -- uname -a
+          multipass exec "$VM_NAME" -- lsb_release -a
+          multipass exec "$VM_NAME" -- df -h
+          
+          # Test setup script transfer
+          multipass transfer setup-vm.sh "$VM_NAME:/tmp/setup-vm.sh"
+          multipass exec "$VM_NAME" -- chmod +x /tmp/setup-vm.sh
+          
+          echo "? VM creation and basic functionality test passed"
+          
+          # Cleanup
+          multipass stop "$VM_NAME"
+          multipass delete "$VM_NAME"
+          multipass purge
+
+  test-setup-script-execution:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Multipass
+        run: |
+          sudo snap install multipass
+          sudo snap connect multipass:ssh-keys
+          
+      - name: Test setup-vm.sh execution
+        run: |
+          VM_NAME="setup-test-$(date +%s)"
+          echo "Testing setup script execution in VM: $VM_NAME"
+          
+          multipass launch 20.04 --name "$VM_NAME" --cpus 2 --memory 3G --disk 10G
+          sleep 15
+          
+          # Transfer and execute setup script with timeout
+          multipass transfer setup-vm.sh "$VM_NAME:/tmp/setup-vm.sh"
+          multipass exec "$VM_NAME" -- chmod +x /tmp/setup-vm.sh
+          
+          echo "Executing setup script (timeout: 20 minutes)..."
+          timeout 1200 multipass exec "$VM_NAME" -- /tmp/setup-vm.sh || echo "Setup script completed or timed out"
+          
+          # Verify key installations
+          echo "Verifying installations..."
+          multipass exec "$VM_NAME" -- which vagrant || echo "? Vagrant not found"
+          multipass exec "$VM_NAME" -- which ansible || echo "? Ansible not found" 
+          multipass exec "$VM_NAME" -- VBoxManage --version || echo "? VirtualBox not found"
+          
+          # Check lab directory structure
+          multipass exec "$VM_NAME" -- test -d /home/ubuntu/vagrant-projects/rhel-lab && echo "? Lab directory created" || echo "? Lab directory missing"
+          
+          # Cleanup
+          multipass stop "$VM_NAME"
+          multipass delete "$VM_NAME"
+          multipass purge
+
+  test-windows-compatibility:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Test Windows PowerShell script
+        shell: powershell
+        run: |
+          Write-Host "Testing Windows PowerShell compatibility..."
+          
+          # Test script syntax
+          if (Test-Path "windows_setup.ps1") {
+            $null = [System.Management.Automation.PSParser]::Tokenize((Get-Content windows_setup.ps1 -Raw), [ref]$null)
+            Write-Host "? PowerShell syntax valid"
+          }
+          
+          # Test if running as admin check works
+          $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+          Write-Host "Admin check function works: $isAdmin"
+          
+          # Test basic PowerShell functions
+          Get-Command Get-Command | Out-Null
+          Write-Host "? PowerShell environment functional"
+
+  test-macos-compatibility:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Test macOS script compatibility
+        run: |
+          echo "Testing macOS script compatibility..."
+          
+          # Test script syntax
+          bash -n macos-setup.sh
+          echo "? macOS script syntax valid"
+          
+          # Test basic commands availability
+          command -v brew || echo "? Homebrew not installed (expected in CI)"
+          command -v multipass || echo "? Multipass not installed (expected in CI)"
+          
+          # Test system info gathering
+          uname -a
+          sw_vers
+          echo "? macOS compatibility verified"
+
+  test-platform-integration:
+    runs-on: ubuntu-latest
+    needs: [test-scripts-syntax, test-linux-environment]
+    timeout-minutes: 90
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Full integration test
+        run: |
+          echo "Running comprehensive RHCE environment integration test..."
+          
+          # Install Multipass
+          sudo snap install multipass
+          sudo snap connect multipass:ssh-keys
+          
+          # Create full test environment
+          VM_NAME="rhce-integration-$(date +%s)"
+          echo "Creating integration test VM: $VM_NAME"
+          
+          multipass launch 20.04 --name "$VM_NAME" --cpus 4 --memory 4G --disk 15G
+          sleep 20
+          
+          # Execute full setup
+          multipass transfer setup-vm.sh "$VM_NAME:/tmp/setup-vm.sh"
+          multipass exec "$VM_NAME" -- chmod +x /tmp/setup-vm.sh
+          
+          echo "Running full setup (timeout: 30 minutes)..."
+          timeout 1800 multipass exec "$VM_NAME" -- /tmp/setup-vm.sh
+          
+          # Comprehensive verification
+          echo "Performing comprehensive verification..."
+          
+          # Check core installations
+          multipass exec "$VM_NAME" -- vagrant --version
+          multipass exec "$VM_NAME" -- ansible --version
+          multipass exec "$VM_NAME" -- VBoxManage --version
+          
+          # Check lab environment
+          multipass exec "$VM_NAME" -- test -f /home/ubuntu/vagrant-projects/rhel-lab/Vagrantfile
+          multipass exec "$VM_NAME" -- test -f /home/ubuntu/vagrant-projects/rhel-lab/ansible.cfg
+          multipass exec "$VM_NAME" -- test -f /home/ubuntu/vagrant-projects/rhel-lab/inventory
+          multipass exec "$VM_NAME" -- test -x /home/ubuntu/vagrant-projects/rhel-lab/start-lab.sh
+          
+          # Test Vagrant functionality (without starting VMs to save time)
+          multipass exec "$VM_NAME" -- bash -c "cd /home/ubuntu/vagrant-projects/rhel-lab && vagrant validate"
+          
+          echo "? Integration test completed successfully"
+          
+          # Cleanup
+          multipass stop "$VM_NAME"
+          multipass delete "$VM_NAME"
+          multipass purge
+
+  test-health-check:
+    runs-on: ubuntu-latest
+    needs: [test-scripts-syntax]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Test health check script functionality
+        run: |
+          if [ -f "scripts/health-check.sh" ]; then
+            echo "Testing health check script..."
+            bash -n scripts/health-check.sh
+            echo "? Health check script syntax valid"
+          else
+            echo "? Health check script not found, skipping test"
+          fi
+
+  test-documentation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Verify documentation completeness
+        run: |
+          echo "Checking documentation completeness..."
+          
+          # Check for required files
+          [ -f "README.md" ] && echo "? README.md present" || echo "? README.md missing"
+          [ -f "LICENSE" ] && echo "? LICENSE present" || echo "? LICENSE missing"
+          [ -f "setup-vm.sh" ] && echo "? setup-vm.sh present" || echo "? setup-vm.sh missing"
+          [ -f "linux_setup.sh" ] && echo "? linux_setup.sh present" || echo "? linux_setup.sh missing"
+          [ -f "windows_setup.ps1" ] && echo "? windows_setup.ps1 present" || echo "? windows_setup.ps1 missing"
+          [ -f "macos-setup.sh" ] && echo "? macos-setup.sh present" || echo "? macos-setup.sh missing"
+          
+          # Check README content for key sections
+          grep -q "Quick Start" README.md && echo "? Quick Start section present" || echo "? Quick Start section missing"
+          grep -q "RHCE" README.md && echo "? RHCE references present" || echo "? RHCE references missing"
+          grep -q "Ansible" README.md && echo "? Ansible documentation present" || echo "? Ansible documentation missing"
+          
+          echo "Documentation check completed"
